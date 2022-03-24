@@ -34,6 +34,7 @@ import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import qualified Data.Functor
 import qualified Data.Maybe
 import Control.Monad.State.Lazy (liftIO)
+import Data.Maybe (isNothing)
 
 type Env = IORef [(String, IORef LispVal)]
 
@@ -78,7 +79,7 @@ defineVar envRef var value = do
 
 bindVars :: Env -> [(String, LispVal)] -> IO Env
 bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
-    where extendEnv bindings env = liftM (++ env) (mapM addBinding bindings)
+    where extendEnv bindings env = fmap (++ env) (mapM addBinding bindings)
           addBinding (var, value) = do ref <- newIORef value
                                        return (var, ref)
 
@@ -110,6 +111,7 @@ trapError action = catchError action (return . show)
 
 extractValue :: ThrowsError a -> a
 extractValue (Right val) = val
+extractValue _ = undefined
 
 data LispVal = Atom String
              | List [LispVal]
@@ -237,23 +239,26 @@ eval env badForm = throwError $ BadSpecialForm "Unrecognized special form" badFo
 apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
 apply (PrimitiveFunc func) args = liftThrows $ func args
 apply (Func params varargs body closure) args =
-      if num params /= num args && varargs == Nothing
+      if num params /= num args && isNothing varargs
          then throwError $ NumArgs (num params) args
-         else (liftIO $ bindVars closure $ zip params args) >>= bindVarArgs varargs >>= evalBody
+         else liftIO (bindVars closure $ zip params args) >>= bindVarArgs varargs >>= evalBody
       where remainingArgs = drop (length params) args
             num = toInteger . length
-            evalBody env = liftM last $ mapM (eval env) body
+            evalBody env = last <$> mapM (eval env) body
             bindVarArgs arg env = case arg of
-                Just argName -> liftIO $ bindVars env [(argName, List $ remainingArgs)]
+                Just argName -> liftIO $ bindVars env [(argName, List remainingArgs)]
                 Nothing -> return env
 apply (IOFunc func) args = func args
+apply _ _ = undefined
 
 applyProc :: [LispVal] -> IOThrowsError LispVal
 applyProc [func, List args] = apply func args
 applyProc (func : args)     = apply func args
+applyProc _ = undefined
 
 makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
-makePort mode [String filename] = liftM Port $ liftIO $ openFile filename mode
+makePort mode [String filename] = fmap Port $ liftIO $ openFile filename mode
+makePort _ _ = undefined
 
 closePort :: [LispVal] -> IOThrowsError LispVal
 closePort [Port port] = liftIO $ hClose port >> return (Bool True)
@@ -262,19 +267,23 @@ closePort _ = return $ Bool False
 readProc :: [LispVal] -> IOThrowsError LispVal
 readProc [] = readProc [Port stdin]
 readProc [Port port] = liftIO (hGetLine port) >>= liftThrows . readExpr
+readProc _ = undefined
 
 writeProc :: [LispVal] -> IOThrowsError LispVal
 writeProc [obj] = writeProc [obj, Port stdout]
 writeProc [obj, Port port] = liftIO $ hPrint port obj >> return (Bool True)
+writeProc _ = undefined
 
 readContents :: [LispVal] -> IOThrowsError LispVal
-readContents [String filename] = liftM String $ liftIO $ readFile filename
+readContents [String filename] = fmap String $ liftIO $ readFile filename
+readContents _ = undefined
 
 load :: String -> IOThrowsError [LispVal]
 load filename = liftIO (readFile filename) >>= liftThrows . readExprList
 
 readAll :: [LispVal] -> IOThrowsError LispVal
-readAll [String filename] = liftM List $ load filename
+readAll [String filename] = List <$> load filename
+readAll _ = undefined
 
 primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [("+", numericBinop (+)),
@@ -318,7 +327,7 @@ ioPrimitives = [("apply", applyProc),
 numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
 numericBinop op [] = throwError $ NumArgs 2 []
 numericBinop op singleVal@[_] = throwError $ NumArgs 2 singleVal
-numericBinop op params = mapM unpackNum params >>= return . Number . foldl1 op
+numericBinop op params = mapM unpackNum params Data.Functor.<&> (Number . foldl1 op)
 
 boolBinop :: (LispVal -> ThrowsError a) -> (a  -> a -> Bool) -> [LispVal] -> ThrowsError LispVal
 boolBinop unpacker op args = if length args /= 2
@@ -373,16 +382,17 @@ cons [x1, x2]                 = return $ DottedList [x1] x2
 cons badArgList               = throwError $ NumArgs 2 badArgList
 
 eqv :: [LispVal] -> ThrowsError LispVal
-eqv [(Bool arg1), (Bool arg2)]              = return $ Bool $ arg1 == arg2
-eqv [(Number arg1), (Number arg2)]          = return $ Bool $ arg1 == arg2
-eqv [(String arg1), (String arg2)]          = return $ Bool $ arg1 == arg2
-eqv [(Atom arg1), (Atom arg2)]              = return $ Bool $ arg1 == arg2
-eqv [(DottedList xs x),  (DottedList ys y)] = eqv [List $ xs ++ [x], List $ ys ++ [y]]
-eqv [(List arg1), (List arg2)]               = return $ Bool $ (length arg1 == length arg2) &&
+eqv [Bool arg1, Bool arg2]              = return $ Bool $ arg1 == arg2
+eqv [Number arg1, Number arg2]          = return $ Bool $ arg1 == arg2
+eqv [String arg1, String arg2]          = return $ Bool $ arg1 == arg2
+eqv [Atom arg1, Atom arg2]              = return $ Bool $ arg1 == arg2
+eqv [DottedList xs x, DottedList ys y] = eqv [List $ xs ++ [x], List $ ys ++ [y]]
+eqv [List arg1, List arg2]               = return $ Bool $ (length arg1 == length arg2) &&
                                                               all eqvPair (zip arg1 arg2)
-    where eqvPair (x1, x2) = case eqv [x1, x2] of
-                               Left err -> False
-                               Right (Bool val) -> val
+     where eqvPair (x1, x2) = case eqv [x1, x2] of
+                                   Left err -> False
+                                   Right (Bool val) -> val
+                                   _ -> undefined
 eqv [_, _]                                  = return $ Bool False
 eqv badArgList                              = throwError $ NumArgs 2 badArgList
 
@@ -397,10 +407,10 @@ unpackEquals arg1 arg2 (AnyUnpacker unpacker) =
 
 equal :: [LispVal] -> ThrowsError LispVal
 equal [arg1, arg2] = do
-      primitiveEquals <- liftM or $ mapM (unpackEquals arg1 arg2)
+      primitiveEquals <- or <$> mapM (unpackEquals arg1 arg2)
                          [AnyUnpacker unpackNum, AnyUnpacker unpackStr, AnyUnpacker unpackBool]
       eqvEquals <- eqv [arg1, arg2]
-      return $ Bool $ (primitiveEquals || let (Bool x) = eqvEquals in x)
+      return $ Bool (primitiveEquals || let (Bool x) = eqvEquals in x)
 equal badArgList = throwError $ NumArgs 2 badArgList
 
 readOrThrow :: Parser a -> String -> ThrowsError a
@@ -446,4 +456,4 @@ runRepl = primitiveBindings >>= until_ (== "quit") (readPrompt "Lisp>>> ") . eva
 
 main :: IO ()
 main = do args <- getArgs
-          if null args then runRepl else runOne $ args
+          if null args then runRepl else runOne args
