@@ -26,7 +26,6 @@ import System.IO ( hFlush, stdout, Handle, IOMode (ReadMode, WriteMode), openFil
 import Control.Monad ( liftM )
 import Control.Monad.Except ( MonadError(..), ExceptT, runExceptT )
 
-import qualified MyLib (someFunc)
 import Text.ParserCombinators.ReadPrec (reset)
 import Control.Arrow (ArrowChoice(right))
 import Data.Bits (Bits(xor))
